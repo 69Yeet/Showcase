@@ -10,6 +10,8 @@ project(Showcase VERSION 1.0
 
 #set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
+make_directory( ${CMAKE_SOURCE_DIR}/build )
+
 find_package(Vulkan REQUIRED)
 include_directories( ${VULKAN_INCLUDE_DIRS} )
 

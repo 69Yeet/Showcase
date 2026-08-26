@@ -1,8 +1,11 @@
 #ifndef RENDERER_HPP
 #define RENDERER_HPP
 
+#define VK_USE_PLATFORM_WIN32_KHR
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
 #include <vector>
 #include <cstring>
 #include <stdexcept>
@@ -63,16 +66,21 @@ class Renderer
 	
 	private:
 		GLFWwindow* window;
-		uint32_t width = 800;
-		uint32_t height = 600;
+		uint32_t width { 800 };
+		uint32_t height { 600 };
 		VkInstance instance;
 		VkDebugUtilsMessengerEXT debugMessenger;
 		uint32_t argc;
 		char **argv;
-		VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-		VkDevice device = VK_NULL_HANDLE;
+		VkPhysicalDevice physicalDevice { VK_NULL_HANDLE };
+		VkDevice device { VK_NULL_HANDLE };
 		VkQueue graphicsQueue;
-		
+		VkSurfaceCapabilitiesKHR surfaceCaps;
+		VkSurfaceKHR surface { VK_NULL_HANDLE };
+		VkSwapchainKHR swapchain;
+		uint32_t imageCount { 0 };
+		std::vector<VkImage> swapchainImages;
+		std::vector<VkImageView> swapchainImagesView;
 		
 		void initWindow()
 		{
@@ -90,6 +98,8 @@ class Renderer
 			SetupDebugMessenger();
 			PickPhysicalDevice();
 			CreateLogicalDevice();
+			CreateSurface();
+			CreateSwapchain();
 		}
 
 		void mainLoop()
@@ -102,6 +112,7 @@ class Renderer
 
 		void cleanup()
 		{
+			vkDestroySwapchainKHR(device, swapchain, nullptr);
 			vkDestroyDevice(device, nullptr);
 
 			if (enableValidationLayers) 
@@ -109,6 +120,7 @@ class Renderer
     		    DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
     		}
 
+			vkDestroySurfaceKHR(instance, surface, nullptr);
 			vkDestroyInstance(instance, nullptr);
 
 			glfwDestroyWindow(window);
@@ -268,6 +280,67 @@ class Renderer
 			}
 
 			vkGetDeviceQueue(device, queueFamily, 0, &graphicsQueue);
+		}
+
+		void CreateSurface()
+		{
+			if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create window surface!");
+			}
+
+			if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to get surface capabilities!");
+			}
+		}
+
+		void CreateSwapchain()
+		{
+			VkExtent2D swapchainExtent { surfaceCaps.currentExtent };
+			if (surfaceCaps.currentExtent.width = 0xFFFFFFFF)
+			{
+				swapchainExtent = {
+					.width = static_cast<uint32_t>(width), 
+					.height = static_cast<uint32_t>(height)
+				};
+			}
+
+			const VkFormat imageFormat { VK_FORMAT_R8G8B8A8_SRGB};
+			VkSwapchainCreateInfoKHR swapchainCI
+			{
+				.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+				.surface = surface,
+				.minImageCount = surfaceCaps.minImageCount,
+				.imageFormat = imageFormat,
+				.imageColorSpace = VK_COLORSPACE_SRGB_NONLINEAR_KHR,
+				.imageExtent = { 
+					.width = static_cast<uint32_t>(width), 
+					.height = static_cast<uint32_t>(height)
+				},
+				.imageArrayLayers = 1,
+				.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+				.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
+				.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+				.presentMode = VK_PRESENT_MODE_FIFO_KHR
+			};
+
+			if (vkCreateSwapchainKHR(device, &swapchainCI, nullptr, &swapchain) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create swapchain!");
+			}
+
+			if (vkGetSwapchainImagesKHR(device, swapchain, &imageCount, nullptr) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to get swapchain image count!");
+			}
+			swapchainImages.resize(imageCount);
+
+			if (vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapchainImages.data()) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to get swapchain images!");
+			}
+			swapchainImagesView.resize(imageCount);
 		}
 
 		void SetupDebugMessenger()
