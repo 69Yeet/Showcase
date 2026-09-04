@@ -81,7 +81,12 @@ class Renderer
 		uint32_t imageCount { 0 };
 		std::vector<VkImage> swapchainImages;
 		std::vector<VkImageView> swapchainImagesView;
-		
+		VkImage depthImage;
+		VkImageView depthImageView;
+
+		//Memory variables to be changed later
+		VkDeviceMemory depthImageMemory;
+
 		void initWindow()
 		{
 			glfwInit();
@@ -100,6 +105,7 @@ class Renderer
 			CreateLogicalDevice();
 			CreateSurface();
 			CreateSwapchain();
+			CreateDepthImage();
 		}
 
 		void mainLoop()
@@ -112,7 +118,11 @@ class Renderer
 
 		void cleanup()
 		{
-			vkDestroySwapchainKHR(device, swapchain, nullptr);
+			CleanupSwapchain();
+			vkDestroyImageView(device, depthImageView, nullptr);
+			vkDestroyImage(device, depthImage, nullptr);
+			vkFreeMemory(device, depthImageMemory, nullptr);
+			
 			vkDestroyDevice(device, nullptr);
 
 			if (enableValidationLayers) 
@@ -341,7 +351,127 @@ class Renderer
 				throw std::runtime_error("Failed to get swapchain images!");
 			}
 			swapchainImagesView.resize(imageCount);
+
+			for (auto i = 0; i < imageCount; i++)
+			{
+				VkImageViewCreateInfo viewCI
+				{
+					.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+					.image = swapchainImages[i],
+					.viewType = VK_IMAGE_VIEW_TYPE_2D, .format = imageFormat,
+					.subresourceRange{
+						.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+						.levelCount = 1,
+						.layerCount = 1
+					} 
+				};
+				if(vkCreateImageView(device, &viewCI, nullptr, &swapchainImagesView[i]) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to create image views!");
+				}
+			}
 		}
+
+		void CreateDepthImage()
+		{
+			std::vector<VkFormat> depthFormatList { VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT};
+			VkFormat depthFormat { VK_FORMAT_UNDEFINED };
+			for (VkFormat& format : depthFormatList)
+			{
+				VkFormatProperties2 formatProperties { .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2 };
+				vkGetPhysicalDeviceFormatProperties2(physicalDevice, format, &formatProperties);
+				if (formatProperties.formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+				{
+					depthFormat = format;
+					break;
+				}
+			}
+
+			VkImageCreateInfo depthImageCI
+			{
+				.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+				.imageType = VK_IMAGE_TYPE_2D,
+				.format = depthFormat,
+				.extent = { .width = width, .height = height, .depth = 1},
+				.mipLevels = 1,
+				.arrayLayers = 1,
+				.samples = VK_SAMPLE_COUNT_1_BIT,
+				.tiling = VK_IMAGE_TILING_OPTIMAL,
+				.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+				.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+			};
+
+			if (CreateImage(depthImage, depthImageMemory, depthImageCI, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create depth image!");
+			}
+			
+			VkImageViewCreateInfo depthViewCI
+			{
+				.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+				.image = depthImage,
+				.viewType = VK_IMAGE_VIEW_TYPE_2D,
+				.format = depthFormat,
+				.subresourceRange { .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1 }
+			};
+
+			if (vkCreateImageView(device, &depthViewCI, nullptr, &depthImageView) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create depth view!");
+			}
+
+
+		}
+
+		void CleanupSwapchain()
+		{
+			for (VkImageView imageView : swapchainImagesView)
+			{
+				vkDestroyImageView(device, imageView, nullptr);
+			}
+
+			vkDestroySwapchainKHR(device, swapchain, nullptr);
+		}
+
+		VkResult CreateImage(VkImage& image, VkDeviceMemory& memory, VkImageCreateInfo& imageCI, VkMemoryPropertyFlags properties)
+		{
+			if (vkCreateImage(device, &imageCI, nullptr, &image) != VK_SUCCESS) 
+			{
+        		return VK_ERROR_INITIALIZATION_FAILED;
+    		}
+			VkMemoryRequirements memReqs;
+			vkGetImageMemoryRequirements(device, image, &memReqs);
+
+			VkMemoryAllocateInfo imageAI
+			{
+				.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+				.allocationSize = memReqs.size,
+				.memoryTypeIndex = findMemoryType(memReqs.memoryTypeBits, properties)
+			};
+
+			if (vkAllocateMemory(device, &imageAI, nullptr, &memory) != VK_SUCCESS)
+			{
+				return VK_ERROR_OUT_OF_HOST_MEMORY;
+			}
+
+			vkBindImageMemory(device, image, memory, 0);
+
+			return VK_SUCCESS;
+		}
+
+		uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) 
+		{
+    	    VkPhysicalDeviceMemoryProperties memProperties;
+    	    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+
+    	    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+    	        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+    	            return i;
+    	        }
+    	    }
+
+    	    throw std::runtime_error("failed to find suitable memory type!");
+    	}
 
 		void SetupDebugMessenger()
 		{
