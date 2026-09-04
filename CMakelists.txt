@@ -23,15 +23,29 @@ add_executable(showcase src/main.cpp)
 
 include(FetchContent)
 
+set(FETCHCONTENT_BASE_DIR ${PROJECT_SOURCE_DIR}/libs CACHE PATH "Missing description." FORCE)
+
 FetchContent_Declare(
 	glm
 	GIT_REPOSITORY	https://github.com/g-truc/glm.git
 	GIT_TAG 	0af55ccecd98d4e5a8d1fad7de25ba429d60e863 #refs/tags/1.0.1
 )
 
+FetchContent_Declare(assimp
+GIT_REPOSITORY https://github.com/assimp/assimp.git
+GIT_TAG master)
+
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INJECT_DEBUG_POSTFIX OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
+
 FetchContent_MakeAvailable(glm)
+FetchContent_MakeAvailable(assimp)
+
+target_include_directories(showcase PRIVATE libs/assimp-src/include)
 
 target_include_directories(showcase PRIVATE include/GLFW)
 target_link_directories(showcase PRIVATE lib/GLFW)
 
-target_link_libraries(showcase PRIVATE glfw3 Vulkan::Vulkan -static-libgcc -static-libstdc++)
+target_link_libraries(showcase PRIVATE glfw3 Vulkan::Vulkan assimp glm -static-libgcc -static-libstdc++)
