@@ -12,6 +12,15 @@
 #include <cstdlib>
 #include <iostream>
 #include <cassert>
+#include <array>
+#include <vulkan/vk_enum_string_helper.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
+#include "vertex.hpp"
+#include "shader.hpp"
+#include "texture.hpp"
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;
@@ -40,6 +49,16 @@ void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT
         func(instance, debugMessenger, pAllocator);
     }
 }
+
+std::vector<Vertex> testModel 
+{
+	{ {.5f, 0, .5f}, {0, -1, 0}, {0, 0} },
+	{ {.5f, 0, -.5f}, {0, -1, 0}, {1, 0} },
+	{ {-.5f, .5f, .5f}, {0, -1, 0}, {0, 1} },
+	{ {-.5f, .5f, -.5f}, {0, -1, 0}, {1, 1} }
+};
+
+constexpr uint32_t maxFramesInFlight{2};
 
 class Renderer
 {
@@ -77,6 +96,12 @@ class Renderer
 		VkQueue graphicsQueue;
 		VkSurfaceCapabilitiesKHR surfaceCaps;
 		VkSurfaceKHR surface { VK_NULL_HANDLE };
+
+		std::array<VkCommandBuffer, maxFramesInFlight> commandBuffers;
+		std::array<VkFence, maxFramesInFlight> fences;
+		std::array<VkSemaphore, maxFramesInFlight> imageAcquiredSemaphores;
+		std::vector<VkSemaphore> renderCompleteSemaphores;
+
 		VkSwapchainKHR swapchain;
 		uint32_t imageCount { 0 };
 		std::vector<VkImage> swapchainImages;
@@ -84,8 +109,19 @@ class Renderer
 		VkImage depthImage;
 		VkImageView depthImageView;
 
+		VkCommandPool commandPool;
+
+		VkImage textureImage;
+		VkImageView textureImageView;
+		std::vector<VkDescriptorImageInfo> textureDescriptors{};
+
 		//Memory variables to be changed later
 		VkDeviceMemory depthImageMemory;
+		VkBuffer vBuffer;
+		VkDeviceMemory vertexMemory;
+		std::array<ShaderDataBuffer, maxFramesInFlight> shaderDataBuffers;
+		VkDeviceMemory textureImageMemory;
+		std::array<Texture, 3> textures{};
 
 		void initWindow()
 		{
@@ -106,6 +142,11 @@ class Renderer
 			CreateSurface();
 			CreateSwapchain();
 			CreateDepthImage();
+			LoadMesh();
+			CreateShaderBuffer();
+			SetupSynchronisation();
+			CreateCommandBuffers();
+			LoadTextures();
 		}
 
 		void mainLoop()
@@ -119,10 +160,21 @@ class Renderer
 		void cleanup()
 		{
 			CleanupSwapchain();
+
+			CleanupTextures();
+
+			CleanupSynchronisation();
+			vkDestroyCommandPool(device, commandPool, nullptr);
+
 			vkDestroyImageView(device, depthImageView, nullptr);
 			vkDestroyImage(device, depthImage, nullptr);
 			vkFreeMemory(device, depthImageMemory, nullptr);
+
+			CleanupShaderDataBuffer();
 			
+			vkDestroyBuffer(device, vBuffer, nullptr);
+			vkFreeMemory(device, vertexMemory, nullptr);
+
 			vkDestroyDevice(device, nullptr);
 
 			if (enableValidationLayers) 
@@ -423,6 +475,417 @@ class Renderer
 
 		}
 
+		void LoadMesh()
+		{
+			//const VkDeviceSize indexCount = {2};
+
+			VkDeviceSize vBufSize{ sizeof(Vertex) * 4 };
+			VkDeviceSize iBufSize{ sizeof(uint16_t) * 6 };
+
+			std::vector<uint16_t> index{0, 1, 2, 1, 3, 2};
+
+			VkBufferCreateInfo bufferCI
+			{
+			    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+			    .size = vBufSize + iBufSize,
+			    .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+				.sharingMode = VK_SHARING_MODE_EXCLUSIVE
+			};
+
+			if (vkCreateBuffer(device, &bufferCI, nullptr, &vBuffer) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create vertex buffer!");
+			}
+
+			VkMemoryRequirements memReqs;
+			vkGetBufferMemoryRequirements(device, vBuffer, &memReqs);
+
+			VkMemoryAllocateInfo vertexAI
+			{
+				.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+				.allocationSize = memReqs.size,
+				.memoryTypeIndex = findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+			};
+
+			if (vkAllocateMemory(device, &vertexAI, nullptr, &vertexMemory) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to allocate memory to vertex buffer!");
+			}
+
+			vkBindBufferMemory(device, vBuffer, vertexMemory, 0);
+
+			void* data;
+			vkMapMemory(device, vertexMemory, 0, bufferCI.size, 0, &data);
+			memcpy(data, testModel.data(), vBufSize);
+			memcpy(((char *)data) + vBufSize, index.data(), iBufSize);
+			vkUnmapMemory(device, vertexMemory);
+		}
+
+		void CreateShaderBuffer()
+		{
+			for (auto i = 0; i < maxFramesInFlight; i++) 
+			{
+    			VkBufferCreateInfo uBufferCI{
+    			    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+    			    .size = sizeof(ShaderData),
+    			    .usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+    			};
+
+				if (vkCreateBuffer(device, &uBufferCI, nullptr, &shaderDataBuffers[i].buffer) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to create shader data buffer!");
+				}
+
+				VkMemoryRequirements memReqs;
+				vkGetBufferMemoryRequirements(device, shaderDataBuffers[i].buffer, &memReqs);
+
+				VkMemoryAllocateFlagsInfo memAFI
+				{
+					.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+					.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT
+				};
+
+				shaderDataBuffers[i].allocationInfo = 
+				{
+					.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+					.pNext = &memAFI,
+					.allocationSize = memReqs.size,
+					.memoryTypeIndex = findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+				};
+
+				if (vkAllocateMemory(device, &shaderDataBuffers[i].allocationInfo, nullptr, &shaderDataBuffers[i].memory) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to allocate shader data memory!");
+				}
+
+				vkBindBufferMemory(device, shaderDataBuffers[i].buffer, shaderDataBuffers[i].memory, 0);
+
+				VkBufferDeviceAddressInfo uBufferBdaInfo
+				{
+    			    .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+    			    .buffer = shaderDataBuffers[i].buffer
+    			};
+    			shaderDataBuffers[i].deviceAddress = vkGetBufferDeviceAddress(device, &uBufferBdaInfo);
+			}
+		}
+
+		void SetupSynchronisation()
+		{
+			VkSemaphoreCreateInfo semaphoreCI
+			{
+			    .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
+			};
+			VkFenceCreateInfo fenceCI
+			{
+			    .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+			    .flags = VK_FENCE_CREATE_SIGNALED_BIT
+			};
+			for (auto i = 0; i < maxFramesInFlight; i++) {
+			    if (vkCreateFence(device, &fenceCI, nullptr, &fences[i]) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to setup fence!");
+				}
+			    if (vkCreateSemaphore(device, &semaphoreCI, nullptr, &imageAcquiredSemaphores[i]) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to setup semaphore!");
+				}
+			}
+			renderCompleteSemaphores.resize(swapchainImages.size());
+			for (auto i = 0; i < swapchainImages.size(); i++)
+			{
+			    if (vkCreateSemaphore(device, &semaphoreCI, nullptr, &renderCompleteSemaphores[i]) != VK_SUCCESS)
+				{
+					throw std::runtime_error("/n Failed to setup render semaphores!");
+				}
+			}
+		}
+
+		void CreateCommandBuffers()
+		{
+			VkCommandPoolCreateInfo commandPoolCI
+			{
+				.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+				.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+				.queueFamilyIndex = PickQueueFamily(physicalDevice)
+			};
+
+			if (vkCreateCommandPool(device, &commandPoolCI, nullptr, &commandPool) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create command pool!");
+			}
+
+			VkCommandBufferAllocateInfo commandBufferAI
+			{
+				.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+				.commandPool = commandPool,
+				.commandBufferCount = maxFramesInFlight
+			};
+
+			if (vkAllocateCommandBuffers(device, &commandBufferAI, commandBuffers.data()) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create command buffers!");
+			} 
+		}
+
+		void LoadTextures()
+		{
+			for (auto i = 0; i < textures.size(); i++)
+			{
+
+				int texWidth, texHeight, texChannels;
+				std::string filename = "F:/Programming/Cpp/Masterpiece/build/textures/texture" + std::to_string(i) + ".jpg";
+    			stbi_uc* pixels = stbi_load(filename.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+
+				if (pixels == nullptr)
+				{
+					std::cout << "Texture doesn't exist! \n";
+					break;
+				}
+
+    			VkDeviceSize imageSize = texWidth * texHeight * 4;
+
+    			if (!pixels) {
+    			    throw std::runtime_error("failed to load texture image!");
+    			}
+
+				VkBuffer stagingBuffer;
+				VkDeviceMemory stagingBufferMemory;
+
+				CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+							VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+				
+				void* data;
+				vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
+		    	memcpy(data, pixels, static_cast<size_t>(imageSize));
+				vkUnmapMemory(device, stagingBufferMemory);
+
+				stbi_image_free(pixels);
+
+				VkImageCreateInfo texImgCI
+				{
+				    .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+				    .imageType = VK_IMAGE_TYPE_2D,
+				    .format = VK_FORMAT_R8G8B8A8_SRGB,
+				    .extent = {.width = (uint32_t)texWidth, .height = (uint32_t)texHeight, .depth = 1 },
+				    .mipLevels = 1,
+				    .arrayLayers = 1,
+				    .samples = VK_SAMPLE_COUNT_1_BIT,
+				    .tiling = VK_IMAGE_TILING_OPTIMAL,
+				    .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+				    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+				};
+
+				if (vkCreateImage(device, &texImgCI, nullptr, &textures[i].image) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to create image!");
+				}
+
+
+				VkMemoryRequirements memReqs;
+				vkGetImageMemoryRequirements(device, textures[i].image, &memReqs);
+
+				VkMemoryAllocateInfo imageAI
+				{
+					.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+					.allocationSize = memReqs.size,
+					.memoryTypeIndex = findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+				};
+
+				if (vkAllocateMemory(device, &imageAI, nullptr, &textures[i].memory) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to allocate memory to texture!");
+				}
+
+				VkImageViewCreateInfo texViewCI
+				{
+				    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+				    .image = textures[i].image,
+				    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+				    .format = texImgCI.format,
+				    .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 }
+				};
+
+				vkBindImageMemory(device, textures[i].image, textures[i].memory, 0);
+				
+				if (vkCreateImageView(device, &texViewCI, nullptr, &textures[i].view) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to create depth view!");
+				}
+
+				VkFenceCreateInfo fenceOneTimeCI
+				{
+				    .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO
+				};
+				VkFence fenceOneTime{};
+				if (vkCreateFence(device, &fenceOneTimeCI, nullptr, &fenceOneTime) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to create fence!");
+				}
+				VkCommandBuffer cbOneTime{};
+				VkCommandBufferAllocateInfo cbOneTimeAI{
+				    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+				    .commandPool = commandPool,
+				    .commandBufferCount = 1
+				};
+
+				if (vkAllocateCommandBuffers(device, &cbOneTimeAI, &cbOneTime) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to create command buffer!");
+				}
+
+				VkCommandBufferBeginInfo cbOneTimeBI
+				{
+				    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+				    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+				};
+
+				if(vkBeginCommandBuffer(cbOneTime, &cbOneTimeBI) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to start command buffer!");
+				}
+
+				VkImageMemoryBarrier2 barrierTexImage{
+				    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+				    .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+				    .srcAccessMask = VK_ACCESS_2_NONE,
+				    .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+				    .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+				    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+				    .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				    .image = textures[i].image,
+				    .subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 }
+				};
+				VkDependencyInfo barrierTexInfo{
+				    .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+				    .imageMemoryBarrierCount = 1,
+				    .pImageMemoryBarriers = &barrierTexImage
+				};
+				vkCmdPipelineBarrier2(cbOneTime, &barrierTexInfo);
+
+				VkBufferImageCopy region
+				{
+    	    		.bufferOffset = 0,
+    	    		.bufferRowLength = 0,
+    	    		.bufferImageHeight = 0,
+					.imageSubresource =
+					{
+    	    			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+    	    			.mipLevel = 0,
+    	    			.baseArrayLayer = 0,
+    	    			.layerCount = 1,
+					},
+    	    		.imageOffset = {0, 0, 0},
+    	    		.imageExtent = 
+					{
+    	    		    (uint32_t)texWidth,
+    	    		    (uint32_t)texHeight,
+    	    		    1
+    	    		}
+				};
+				vkCmdCopyBufferToImage(cbOneTime, stagingBuffer, textures[i].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+				VkImageMemoryBarrier2 barrierTexRead
+				{
+				    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+				    .srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
+				    .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+				    .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				    .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+				    .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				    .newLayout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+				    .image = textures[i].image,
+				    .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 }
+				};
+				barrierTexInfo.pImageMemoryBarriers = &barrierTexRead;
+				vkCmdPipelineBarrier2(cbOneTime, &barrierTexInfo);
+				if (vkEndCommandBuffer(cbOneTime) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to end command buffer!");
+				}
+
+				VkCommandBufferSubmitInfo cbOneTimeSubmitInfo
+				{
+				    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+				    .commandBuffer = cbOneTime
+				};
+
+				VkSubmitInfo2 oneTimeSI
+				{
+				    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+				    .commandBufferInfoCount = 1,
+				    .pCommandBufferInfos = &cbOneTimeSubmitInfo
+				};
+
+				if (vkQueueSubmit2(graphicsQueue, 1, &oneTimeSI, fenceOneTime) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to submit queue");
+				}
+				if (vkWaitForFences(device, 1, &fenceOneTime, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to wait for fence!");
+				}
+
+				vkDestroyBuffer(device, stagingBuffer, nullptr);
+				vkFreeMemory(device, stagingBufferMemory, nullptr);
+				vkDestroyFence(device, fenceOneTime, nullptr);
+
+				VkSamplerCreateInfo samplerCI
+				{
+				    .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+				    .magFilter = VK_FILTER_LINEAR,
+				    .minFilter = VK_FILTER_LINEAR,
+				    .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+				    .anisotropyEnable = VK_TRUE,
+				    .maxAnisotropy = 8.0f, // 8 is a widely supported value for max anisotropy
+				    .maxLod = 0
+				};
+				if (vkCreateSampler(device, &samplerCI, nullptr, &textures[i].sampler) != VK_SUCCESS)
+				{
+					throw std::runtime_error("Failed to create sampler!");
+				}
+
+				textureDescriptors.push_back({
+				    .sampler = textures[i].sampler,
+				    .imageView = textures[i].view,
+				    .imageLayout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL
+				});
+			}
+		}
+
+		void CleanupTextures()
+		{
+			for (auto i = 0; i < textures.size(); i++)
+			{
+				vkDestroySampler(device, textures[i].sampler, nullptr);
+				vkDestroyImageView(device, textures[i].view, nullptr);
+				vkDestroyImage(device, textures[i].image, nullptr);
+				vkFreeMemory(device, textures[i].memory, nullptr);
+			}
+		}
+
+		void CleanupSynchronisation()
+		{
+			for (int i = 0; i < maxFramesInFlight; i++)
+			{
+				vkDestroyFence(device, fences[i], nullptr);
+				vkDestroySemaphore(device, imageAcquiredSemaphores[i], nullptr);
+			}
+
+			for (auto& semaphore : renderCompleteSemaphores)
+			{
+				vkDestroySemaphore(device, semaphore, nullptr);
+			}
+		}
+
+		void CleanupShaderDataBuffer()
+		{
+			for (auto i = 0; i < maxFramesInFlight; i++) 
+			{
+				shaderDataBuffers[i].deviceAddress = 0;
+				vkDestroyBuffer(device, shaderDataBuffers[i].buffer, nullptr);
+				vkFreeMemory(device, shaderDataBuffers[i].memory, nullptr);
+			}
+		}
+
 		void CleanupSwapchain()
 		{
 			for (VkImageView imageView : swapchainImagesView)
@@ -431,6 +894,39 @@ class Renderer
 			}
 
 			vkDestroySwapchainKHR(device, swapchain, nullptr);
+		}
+
+		void CreateBuffer(VkDeviceSize size, VkBufferUsageFlagBits usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory)
+		{
+			VkBufferCreateInfo bufferCI
+			{
+				.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+				.size = size,
+				.usage = usage,
+				.sharingMode = VK_SHARING_MODE_EXCLUSIVE
+			};
+
+			if (vkCreateBuffer(device, &bufferCI, nullptr, &buffer) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create buffer!");
+			}
+
+			VkMemoryRequirements memReqs;
+			vkGetBufferMemoryRequirements(device, buffer, &memReqs);
+
+			VkMemoryAllocateInfo bufferAI
+			{
+				.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+				.allocationSize = memReqs.size,
+				.memoryTypeIndex = findMemoryType(memReqs.memoryTypeBits, properties)
+			};
+
+			if (vkAllocateMemory(device, &bufferAI, nullptr, &bufferMemory) != VK_SUCCESS) 
+			{
+            	throw std::runtime_error("failed to allocate buffer memory!");
+        	}
+
+        	vkBindBufferMemory(device, buffer, bufferMemory, 0);
 		}
 
 		VkResult CreateImage(VkImage& image, VkDeviceMemory& memory, VkImageCreateInfo& imageCI, VkMemoryPropertyFlags properties)
