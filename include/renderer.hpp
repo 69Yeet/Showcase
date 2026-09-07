@@ -14,6 +14,9 @@
 #include <cassert>
 #include <array>
 #include <vulkan/vk_enum_string_helper.h>
+#include <slang.h>
+#include <slang-com-ptr.h>
+#include "slang-com-helper.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -27,6 +30,8 @@
 #else
     const bool enableValidationLayers = true;
 #endif
+
+const std::string EXECNAME = "showcase.exe";
 
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
@@ -50,6 +55,41 @@ void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT
     }
 }
 
+void diagnoseIfNeeded(slang::IBlob* diagnosticsBlob)
+{
+    if (diagnosticsBlob != nullptr)
+    {
+        std::cout << (const char*)diagnosticsBlob->getBufferPointer() << std::endl;
+    }
+}
+
+void getExecDir(std::string& pathBuffer)
+    {
+        char execDirBuffer[MAX_PATH];
+        GetModuleFileName(NULL, execDirBuffer, sizeof(execDirBuffer));
+        pathBuffer = {};
+        int i = 0;
+
+        for(char dirLetter : execDirBuffer)
+        {
+            pathBuffer += dirLetter;
+
+            if(i != 0)
+            {
+                i++;
+                if(i == 4)
+                {
+                    break;
+                }
+            } else if (dirLetter == '.')
+            {
+                i++;
+            }
+        }
+
+        pathBuffer.erase(pathBuffer.find(EXECNAME), EXECNAME.length());
+    }
+
 std::vector<Vertex> testModel 
 {
 	{ {.5f, 0, .5f}, {0, -1, 0}, {0, 0} },
@@ -65,6 +105,7 @@ class Renderer
 	public:
 		void run()
 		{
+			getExecDir(execLoc);
 			initWindow();
 			initVulkan();
 			mainLoop();
@@ -84,6 +125,7 @@ class Renderer
 		}
 	
 	private:
+		std::string execLoc;
 		GLFWwindow* window;
 		uint32_t width { 800 };
 		uint32_t height { 600 };
@@ -114,6 +156,8 @@ class Renderer
 		VkImage textureImage;
 		VkImageView textureImageView;
 		std::vector<VkDescriptorImageInfo> textureDescriptors{};
+
+		VkShaderModule shaderModule{};
 
 		//Memory variables to be changed later
 		VkDeviceMemory depthImageMemory;
@@ -147,6 +191,7 @@ class Renderer
 			SetupSynchronisation();
 			CreateCommandBuffers();
 			LoadTextures();
+			LoadShader();
 		}
 
 		void mainLoop()
@@ -171,6 +216,8 @@ class Renderer
 			vkFreeMemory(device, depthImageMemory, nullptr);
 
 			CleanupShaderDataBuffer();
+
+			vkDestroyShaderModule(device, shaderModule, nullptr);
 			
 			vkDestroyBuffer(device, vBuffer, nullptr);
 			vkFreeMemory(device, vertexMemory, nullptr);
@@ -633,7 +680,7 @@ class Renderer
 			{
 
 				int texWidth, texHeight, texChannels;
-				std::string filename = "F:/Programming/Cpp/Masterpiece/build/textures/texture" + std::to_string(i) + ".jpg";
+				std::string filename = "F:/Programming/Cpp/Masterpiece/build/assets/texture" + std::to_string(i) + ".jpg";
     			stbi_uc* pixels = stbi_load(filename.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
 
 				if (pixels == nullptr)
@@ -848,6 +895,63 @@ class Renderer
 				    .imageView = textures[i].view,
 				    .imageLayout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL
 				});
+			}
+		}
+
+		void LoadShader()
+		{
+			Slang::ComPtr<slang::IGlobalSession> slangGlobalSession;
+			slang::createGlobalSession(slangGlobalSession.writeRef());
+
+			slang::TargetDesc targetDesc = {};
+    		targetDesc.format = SLANG_SPIRV;
+    		targetDesc.profile = slangGlobalSession->findProfile("spirv_1_4");
+
+			std::array<slang::CompilerOptionEntry, 1> options = 
+        	{
+        	    {
+        	        slang::CompilerOptionName::EmitSpirvDirectly,
+        	        {slang::CompilerOptionValueKind::Int, 1, 0, nullptr, nullptr}
+        	    }
+        	};
+
+    		slang::SessionDesc slangSessionDesc
+			{
+			    .targets{&targetDesc},
+			    .targetCount{1},
+			    .defaultMatrixLayoutMode = SLANG_MATRIX_LAYOUT_COLUMN_MAJOR,
+			    .compilerOptionEntries{options.data()},
+			    .compilerOptionEntryCount{uint32_t(options.size())}
+			};
+
+			Slang::ComPtr<slang::ISession> session;
+    		slangGlobalSession->createSession(slangSessionDesc, session.writeRef());
+			Slang::ComPtr<slang::IBlob> spirv;
+
+			Slang::ComPtr<slang::IModule> slangModule;
+    		{
+    		    Slang::ComPtr<slang::IBlob> diagnosticsBlob;
+    		    const char* moduleName = "triangle";
+    		    std::string modulePath = execLoc + "assets/shader.slang";
+    		    slangModule = session->loadModuleFromSource(moduleName, modulePath.c_str(), nullptr, diagnosticsBlob.writeRef());
+				diagnoseIfNeeded(diagnosticsBlob);
+    		    if (!slangModule)
+    		    {
+    		        throw std::runtime_error("Failed to load module!");
+    		    }
+    		}
+			
+			slangModule->getTargetCode(0, spirv.writeRef());
+			
+			VkShaderModuleCreateInfo shaderModuleCI
+			{
+			    .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+			    .codeSize = spirv->getBufferSize(),
+			    .pCode = (uint32_t*)spirv->getBufferPointer()
+			};
+			if (vkCreateShaderModule(device, &shaderModuleCI, nullptr, &shaderModule) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create shader module!");
 			}
 		}
 
