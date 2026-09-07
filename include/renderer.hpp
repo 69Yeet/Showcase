@@ -156,8 +156,14 @@ class Renderer
 		VkImage textureImage;
 		VkImageView textureImageView;
 		std::vector<VkDescriptorImageInfo> textureDescriptors{};
+		VkDescriptorPool descriptorPool{ VK_NULL_HANDLE };
+		VkDescriptorSetLayout descriptorSetLayoutTex{ VK_NULL_HANDLE };
+		VkDescriptorSet descriptorSetTex{ VK_NULL_HANDLE };
 
 		VkShaderModule shaderModule{};
+
+		VkPipelineLayout pipelineLayout;
+		VkPipeline pipeline;
 
 		//Memory variables to be changed later
 		VkDeviceMemory depthImageMemory;
@@ -192,6 +198,7 @@ class Renderer
 			CreateCommandBuffers();
 			LoadTextures();
 			LoadShader();
+			CreateGraphicsPipeline();
 		}
 
 		void mainLoop()
@@ -205,6 +212,13 @@ class Renderer
 		void cleanup()
 		{
 			CleanupSwapchain();
+
+			vkDestroyPipeline(device, pipeline, nullptr);
+			vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+
+			//vkFreeDescriptorSets(device, descriptorPool, 1, &descriptorSetTex);
+			vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+			vkDestroyDescriptorSetLayout(device, descriptorSetLayoutTex, nullptr);
 
 			CleanupTextures();
 
@@ -680,7 +694,7 @@ class Renderer
 			{
 
 				int texWidth, texHeight, texChannels;
-				std::string filename = "F:/Programming/Cpp/Masterpiece/build/assets/texture" + std::to_string(i) + ".jpg";
+				std::string filename = execLoc + "assets/texture" + std::to_string(i) + ".jpg";
     			stbi_uc* pixels = stbi_load(filename.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
 
 				if (pixels == nullptr)
@@ -896,6 +910,78 @@ class Renderer
 				    .imageLayout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL
 				});
 			}
+
+			VkDescriptorBindingFlags descVariableFlag{ VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT };
+			VkDescriptorSetLayoutBindingFlagsCreateInfo descBindingFlags
+			{
+			    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
+			    .bindingCount = 1,
+			    .pBindingFlags = &descVariableFlag
+			};
+			VkDescriptorSetLayoutBinding descLayoutBindingTex
+			{
+			    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			    .descriptorCount = static_cast<uint32_t>(textures.size()),
+			    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
+			};
+			VkDescriptorSetLayoutCreateInfo descLayoutTexCI
+			{
+			    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+			    .pNext = &descBindingFlags,
+			    .bindingCount = 1,
+			    .pBindings = &descLayoutBindingTex
+			};
+			if (vkCreateDescriptorSetLayout(device, &descLayoutTexCI, nullptr, &descriptorSetLayoutTex) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create descriptor layout!");
+			}
+
+			VkDescriptorPoolSize poolSize
+			{
+			    .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			    .descriptorCount = static_cast<uint32_t>(textures.size())
+			};
+			VkDescriptorPoolCreateInfo descPoolCI{
+			    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+			    .maxSets = 1,
+			    .poolSizeCount = 1,
+			    .pPoolSizes = &poolSize
+			};
+			if (vkCreateDescriptorPool(device, &descPoolCI, nullptr, &descriptorPool) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create descriptor pool!");
+			}
+
+			uint32_t variableDescCount{ static_cast<uint32_t>(textures.size()) };
+			VkDescriptorSetVariableDescriptorCountAllocateInfo variableDescCountAI
+			{
+			    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO_EXT,
+			    .descriptorSetCount = 1,
+			    .pDescriptorCounts = &variableDescCount
+			};
+			VkDescriptorSetAllocateInfo texDescSetAlloc
+			{
+			    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+			    .pNext = &variableDescCountAI,
+			    .descriptorPool = descriptorPool,
+			    .descriptorSetCount = 1,
+			    .pSetLayouts = &descriptorSetLayoutTex
+			};
+			if(vkAllocateDescriptorSets(device, &texDescSetAlloc, &descriptorSetTex) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to allocate descriptor sets!");
+			}
+
+			VkWriteDescriptorSet writeDescSet
+			{
+			    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			    .dstSet = descriptorSetTex,
+			    .dstBinding = 0,
+			    .descriptorCount = static_cast<uint32_t>(textureDescriptors.size()),
+			    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 
+			    .pImageInfo = textureDescriptors.data()
+			};
+			vkUpdateDescriptorSets(device, 1, &writeDescSet, 0, nullptr);
 		}
 
 		void LoadShader()
@@ -952,6 +1038,161 @@ class Renderer
 			if (vkCreateShaderModule(device, &shaderModuleCI, nullptr, &shaderModule) != VK_SUCCESS)
 			{
 				throw std::runtime_error("Failed to create shader module!");
+			}
+		}
+
+		void CreateGraphicsPipeline()
+		{
+			VkFormat imageFormat {VK_FORMAT_R8G8B8_SRGB};
+			VkPushConstantRange pushConstantRange
+			{
+				.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+				.size = sizeof(VkDeviceAddress)
+			};
+
+			VkPipelineLayoutCreateInfo pipelineLayoutCI
+			{
+				.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+				.setLayoutCount = 1,
+				.pSetLayouts = &descriptorSetLayoutTex,
+				.pushConstantRangeCount = 1,
+				.pPushConstantRanges = &pushConstantRange
+			};
+
+			if (vkCreatePipelineLayout(device, &pipelineLayoutCI, nullptr, &pipelineLayout) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create pipeline layout!");
+			}
+
+			VkVertexInputBindingDescription vertexBinding
+			{
+				.binding = 0,
+				.stride = sizeof(Vertex),
+				.inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+			};
+
+			std::vector<VkVertexInputAttributeDescription> vertexAttributes
+			{
+				{ .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT },
+    			{ .location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal) },
+    			{ .location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, uv) }
+			};
+
+			VkPipelineVertexInputStateCreateInfo vertexInputState
+			{
+				.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+				.vertexBindingDescriptionCount = 1,
+				.pVertexBindingDescriptions = &vertexBinding,
+				.vertexAttributeDescriptionCount = static_cast<uint32_t>(vertexAttributes.size()),
+				.pVertexAttributeDescriptions = vertexAttributes.data()
+			};
+
+			VkPipelineInputAssemblyStateCreateInfo inputAssemblyState
+			{
+				.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+				.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+			};
+
+			std::vector<VkPipelineShaderStageCreateInfo> shaderStages
+			{
+				{ 
+					.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+    			  	.stage = VK_SHADER_STAGE_VERTEX_BIT,
+    			  	.module = shaderModule, .pName = "main"
+				},
+    			{ 
+					.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+    			  	.stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+    			  	.module = shaderModule, .pName = "main" 
+				}
+			};
+
+			VkPipelineViewportStateCreateInfo viewportState
+			{
+				.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+				.viewportCount = 1,
+				.scissorCount = 1
+			};
+			std::vector<VkDynamicState> dynamicStates { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+			VkPipelineDynamicStateCreateInfo dynamicState
+			{
+			    .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+			    .dynamicStateCount = 2,
+			    .pDynamicStates = dynamicStates.data()
+			};
+
+			VkPipelineDepthStencilStateCreateInfo depthStencilState
+			{
+				.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+				.depthTestEnable = VK_TRUE,
+				.depthWriteEnable = VK_TRUE,
+				.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL
+			};
+
+			std::vector<VkFormat> depthFormatList { VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT};
+			VkFormat depthFormat { VK_FORMAT_UNDEFINED };
+			for (VkFormat& format : depthFormatList)
+			{
+				VkFormatProperties2 formatProperties { .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2 };
+				vkGetPhysicalDeviceFormatProperties2(physicalDevice, format, &formatProperties);
+				if (formatProperties.formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+				{
+					depthFormat = format;
+					break;
+				}
+			}
+
+			VkPipelineRenderingCreateInfo renderingCI
+			{
+				.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+				.colorAttachmentCount = 1,
+				.pColorAttachmentFormats = &imageFormat,
+				.depthAttachmentFormat = depthFormat
+			};
+
+			VkPipelineColorBlendAttachmentState blendAttachment
+			{
+				.colorWriteMask = 0xF
+			};
+
+			VkPipelineColorBlendStateCreateInfo colorBlendState
+			{
+				.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+				.attachmentCount = 1,
+				.pAttachments = &blendAttachment
+			};
+
+			VkPipelineRasterizationStateCreateInfo rasterState
+			{
+				.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+				.lineWidth = 1.0f
+			};
+
+			VkPipelineMultisampleStateCreateInfo multisampleState
+			{
+				.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+				.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+			};
+
+			VkGraphicsPipelineCreateInfo pipelineCI
+			{
+			    .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+			    .pNext = &renderingCI,
+			    .stageCount = 2,
+			    .pStages = shaderStages.data(),
+			    .pVertexInputState = &vertexInputState,
+			    .pInputAssemblyState = &inputAssemblyState,
+			    .pViewportState = &viewportState,
+			    .pRasterizationState = &rasterState,
+			    .pMultisampleState = &multisampleState,
+			    .pDepthStencilState = &depthStencilState,
+			    .pColorBlendState = &colorBlendState,
+			    .pDynamicState = &dynamicState,
+			    .layout = pipelineLayout
+			};
+			if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &pipeline) != VK_SUCCESS)
+			{
+				throw std::runtime_error("Failed to create graphics pipeline!");
 			}
 		}
 
