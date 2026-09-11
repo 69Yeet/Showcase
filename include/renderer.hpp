@@ -97,10 +97,10 @@ void getExecDir(std::string& pathBuffer)
 
 std::vector<Vertex> testModel 
 {
-	{ {.5f, 0, .5f}, {0, -1, 0}, {0, 0} },
-	{ {.5f, 0, -.5f}, {0, -1, 0}, {1, 0} },
-	{ {-.5f, .5f, .5f}, {0, -1, 0}, {0, 1} },
-	{ {-.5f, .5f, -.5f}, {0, -1, 0}, {1, 1} }
+	{ {.5f, 0, -.5f}, {0, -1, 0}, {0, 0} },
+	{ {-.5f, 0, -.5f}, {0, -1, 0}, {1, 0} },
+	{ {.5f, .5f, .5f}, {0, -1, 0}, {0, 1} },
+	{ {-.5f, .5f, .5f}, {0, -1, 0}, {1, 1} }
 };
 
 constexpr uint32_t maxFramesInFlight{2};
@@ -196,7 +196,7 @@ class Renderer
 			glfwInit();
 
 			glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-			glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+			glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
 			window = glfwCreateWindow(width, height, "Showcase", nullptr, nullptr);
 			glfwGetWindowSize(window, &windowSize.x, &windowSize.y);
@@ -242,6 +242,8 @@ class Renderer
 
 		void cleanup()
 		{
+			vkDeviceWaitIdle(device);
+			//vkWaitForFences(device, maxFramesInFlight, fences.data(), VK_TRUE, 1000);
 			CleanupSwapchain();
 
 			vkDestroyPipeline(device, pipeline, nullptr);
@@ -536,7 +538,7 @@ class Renderer
 				.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
 				.imageType = VK_IMAGE_TYPE_2D,
 				.format = depthFormat,
-				.extent = { .width = width, .height = height, .depth = 1},
+				.extent = { .width = static_cast<uint32_t>(windowSize.x), .height = static_cast<uint32_t>(windowSize.y), .depth = 1},
 				.mipLevels = 1,
 				.arrayLayers = 1,
 				.samples = VK_SAMPLE_COUNT_1_BIT,
@@ -1240,7 +1242,7 @@ class Renderer
 			}
 
 			CheckSwapchain(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAcquiredSemaphores[frameIndex], VK_NULL_HANDLE, &imageIndex));
-			shaderData.projection = glm::perspective(glm::radians(90.0f), (float)windowSize.x / (float)windowSize.y, 0.1f, 32.0f);
+			shaderData.projection = glm::perspective(glm::radians(45.0f), (float)windowSize.x / (float)windowSize.y, 0.1f, 32.0f);
 			shaderData.view = glm::translate(glm::mat4(1.0f), camPos);
 
 			for (auto i = 0; i < 3; i++)
@@ -1454,6 +1456,7 @@ class Renderer
 		{
 			if (updateSwapchain) 
 			{
+				glfwGetWindowSize(window, &windowSize.x, &windowSize.y);
 			    updateSwapchain = false;
 			    if (vkDeviceWaitIdle(device) != VK_SUCCESS)
 				{
@@ -1519,43 +1522,7 @@ class Renderer
 			    vkDestroyImage(device, depthImage, nullptr);
 			    vkDestroyImageView(device, depthImageView, nullptr);
 
-				VkImageCreateInfo depthImageCI
-				{
-					.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-					.imageType = VK_IMAGE_TYPE_2D,
-					.format = depthFormat,
-					.extent = 
-					{
-						.width = static_cast<uint32_t>(windowSize.x),
-						.height = static_cast<uint32_t>(windowSize.y),
-						.depth = 1
-					},
-					.mipLevels = 1,
-					.arrayLayers = 1,
-					.samples = VK_SAMPLE_COUNT_1_BIT,
-					.tiling = VK_IMAGE_TILING_OPTIMAL,
-					.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-					.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
-				};
-			    /*VmaAllocationCreateInfo allocCI{
-			        .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
-			        .usage = VMA_MEMORY_USAGE_AUTO
-			    };*/
-
-
-			    //chk(vmaCreateImage(allocator, &depthImageCI, &allocCI, &depthImage, &depthImageAllocation, nullptr));
-			    VkImageViewCreateInfo viewCI
-				{
-			        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-			        .image = depthImage,
-			        .viewType = VK_IMAGE_VIEW_TYPE_2D,
-			        .format = depthFormat,
-			        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1 }
-			    };
-			    if (vkCreateImageView(device, &viewCI, nullptr, &depthImageView) != VK_SUCCESS)
-				{
-					throw std::runtime_error("Failed to create depth view!");
-				}
+				CreateDepthImage();
 			}
 		}
 
@@ -1563,8 +1530,6 @@ class Renderer
 		{
 			Renderer *pThis = reinterpret_cast<Renderer*>(glfwGetWindowUserPointer(window));
 			pThis->updateSwapchain = true;
-			pThis->windowSize.x = width;
-			pThis->windowSize.y = height;
 		}
 
 		inline void CheckSwapchain(VkResult result) {
