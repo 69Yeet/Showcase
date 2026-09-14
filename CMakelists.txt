@@ -20,7 +20,9 @@ include_directories( ${VULKAN_INCLUDE_DIRS} )
 
 include_directories(include)
 
-add_executable(showcase src/main.cpp)
+file(GLOB SOURCES "src/*.cpp")
+
+add_executable(showcase ${SOURCES})
 
 include(FetchContent)
 
@@ -55,6 +57,7 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INJECT_DEBUG_POSTFIX OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
+set(SLANG_LIB_TYPE ON CACHE BOOL "STATIC" FORCE)
 
 FetchContent_MakeAvailable(glm)
 FetchContent_MakeAvailable(assimp)

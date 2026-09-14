@@ -22,13 +22,15 @@
 #include <slang.h>
 #include <slang-com-ptr.h>
 #include "slang-com-helper.h"
+#include <cmath>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
-#include "vertex.hpp"
+//#include "vertex.hpp"
 #include "shader.hpp"
 #include "texture.hpp"
+#include "loader.hpp"
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;
@@ -172,6 +174,7 @@ class Renderer
 		VkDescriptorSet descriptorSetTex{ VK_NULL_HANDLE };
 
 		VkShaderModule shaderModule{};
+		ShaderData shaderData{};
 
 		VkPipelineLayout pipelineLayout;
 		VkPipeline pipeline;
@@ -575,10 +578,14 @@ class Renderer
 		{
 			//const VkDeviceSize indexCount = {2};
 
-			vBufSize = sizeof(Vertex) * 4;
-			iBufSize = sizeof(uint16_t) * 6;
+			loader::ImportedInfo* model;
+			loader::ReadFile(execLoc + "assets/model.fbx", model, LOADER_MESH);
+			loader::Mesh* mesh = static_cast<loader::Mesh*>(model->components[0]);
 
-			std::vector<uint16_t> index{0, 1, 2, 1, 3, 2};
+			vBufSize = sizeof(Vertex) * mesh->vertices.size();
+			iBufSize = sizeof(uint32_t) * mesh->indices.size();
+
+			//std::vector<uint32_t> index{0, 1, 2, 0, 2, 3};
 
 			VkBufferCreateInfo bufferCI
 			{
@@ -612,8 +619,8 @@ class Renderer
 
 			void* data;
 			vkMapMemory(device, vertexMemory, 0, bufferCI.size, 0, &data);
-			memcpy(data, testModel.data(), vBufSize);
-			memcpy(((char *)data) + vBufSize, index.data(), iBufSize);
+			memcpy(data, mesh->vertices.data(), vBufSize);
+			memcpy(((uint8_t *)data) + vBufSize, mesh->indices.data(), iBufSize);
 			vkUnmapMemory(device, vertexMemory);
 		}
 
@@ -1248,6 +1255,7 @@ class Renderer
 			for (auto i = 0; i < 3; i++)
 			{
 				auto instancePos = glm::vec3((float)(i - 1) * 3.0f, 0.0f, 0.0f);
+				objectRotations[i] = glm::vec3(0, std::fmod(glfwGetTime(), 360), 0);
 				shaderData.model[i] = glm::translate(glm::mat4(1.0f), instancePos) * glm::mat4_cast(glm::quat(objectRotations[i]));
 			}
 			void *data;
@@ -1375,10 +1383,10 @@ class Renderer
 			VkDeviceSize vOffset{ 0 };
 			vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSetTex, 0, nullptr);
 			vkCmdBindVertexBuffers(cb, 0, 1, &vBuffer, &vOffset);
-			vkCmdBindIndexBuffer(cb, vBuffer, vBufSize, VK_INDEX_TYPE_UINT16);
+			vkCmdBindIndexBuffer(cb, vBuffer, vBufSize, VK_INDEX_TYPE_UINT32);
 
 			vkCmdPushConstants(cb, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(VkDeviceAddress), &shaderDataBuffers[frameIndex].deviceAddress);
-			vkCmdDrawIndexed(cb, 6, 3, 0, 0, 0); //index count for triangles is 6
+			vkCmdDrawIndexed(cb, iBufSize / sizeof(uint32_t), 3, 0, 0, 0); //index count for triangles is 6
 			vkCmdEndRendering(cb);
 			VkImageMemoryBarrier2 barrierPresent
 			{
